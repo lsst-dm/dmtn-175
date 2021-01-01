@@ -49,9 +49,9 @@
    **This technote is not yet published.**
 
    The ``pipetask`` tool included in the Gen3 middleware for running ``PipelineTasks`` is often opaque and hard to use.  This is partly the result of history; the original interface was much more straightforward, but it assumed a very different collections model than what Butler has now, and the changes made to adapt it to the new collections system did not go deep enough.
-But it also suffers from the fact that many of its steps are "leaky"; information provided in one step (e.g. input collections used for ``QuantumGraph``) cannot be straightforwardly passed to later steps (e.g. execution of that ``QuantumGraph``), forcing it to rely on the user to provide consistent arguments and limiting the guarantees we can make about behavior in the presence of user error.
-Finally, the ``pipetask`` interface is currently only really usable from the command-line, making it hard to write unit tests for concrete ``PipelineTasks``; even if we were to keep the command-line interface the same, we need to refactor the implementation to provide a usable Python API.
-This technote will provide a detailed design sketch for a new `pipetask` interface that attempts to address these problems, centered around a ``git``-like "campaign directory" concept that will be used to save state between different ``pipetask`` invocations.
+   But it also suffers from the fact that many of its steps are "leaky"; information provided in one step (e.g. input collections used for ``QuantumGraph``) cannot be straightforwardly passed to later steps (e.g. execution of that ``QuantumGraph``), forcing it to rely on the user to provide consistent arguments and limiting the guarantees we can make about behavior in the presence of user error.
+   Finally, the ``pipetask`` interface is currently only really usable from the command-line, making it hard to write unit tests for concrete ``PipelineTasks``; even if we were to keep the command-line interface the same, we need to refactor the implementation to provide a usable Python API.
+   This technote will provide a detailed design sketch for a new ``pipetask`` interface that attempts to address these problems, centered around a ``git``-like "campaign directory" concept that will be used to save state between different ``pipetask`` invocations.
 
 .. Add content here.
 .. Do not include the document title (it's automatically added from metadata.yaml).
