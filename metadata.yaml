@@ -1,0 +1,60 @@
+# Document metadata. metadata.yaml is used by documenteer and other tools
+# to build the document and index it. It should be maintained alongside the
+# document in git and kept up to date.
+
+# The series identifier. E.g. SQR, DMTN, SMTN, LDM, LSE, etc.
+series: "DMTN"
+
+# Document number, as a string. It should be three digits, padded with leading zeros
+serial_number: "175"
+
+# Serial number of the document. E.g. SQR-001
+# NOTE: this field is *planned* for deprecation
+doc_id: "DMTN-175"
+
+# Title of the document, without the series/serial designation
+doc_title: "Design sketch for a pipetask overhaul"
+
+# Author names, ordered as a list. Each author name should be formatted as 'First Last'
+authors:
+  - "Jim Bosch"
+
+# Current document revision date, YYYY-MM-DD
+# Only set this field if you need to manually fix the revision date;
+# the revision date is obtained from the HEAD Git commit otherwise.
+# last_revised: 'YYYY-MM-DD'
+
+# Version. Use semantic versioning, e.g., 1.0.0, including .dev, as necessary.
+# This version string should correspond to the git tag when the document is
+# published on Zenodo. If left commented out, the current Git branch is used
+# instead version: '1.0.0'
+
+# Digital Object Identifier (DOI). Uncomment if available.
+# Keep this DOI updated as new releases are pushed to Zenodo
+# doi: 10.5281/zenodo.#####
+
+# Copyright statement
+copyright: "2021, The Trustees of Princeton University"
+
+# Description. A short, 1-2 sentence statemement used by document indices.
+description: "The ``pipetask`` tool included in the Gen3 middleware for running ``PipelineTasks`` is often opaque and hard to use.  This is partly the result of history; the original interface was much more straightforward, but it assumed a very different collections model than what Butler has now, and the changes made to adapt it to the new collections system did not go deep enough.
+But it also suffers from the fact that many of its steps are \"leaky\"; information provided in one step (e.g. input collections used for ``QuantumGraph``) cannot be straightforwardly passed to later steps (e.g. execution of that ``QuantumGraph``), forcing it to rely on the user to provide consistent arguments and limiting the guarantees we can make about behavior in the presence of user error.
+Finally, the ``pipetask`` interface is currently only really usable from the command-line, making it hard to write unit tests for concrete ``PipelineTasks``; even if we were to keep the command-line interface the same, we need to refactor the implementation to provide a usable Python API.
+This technote will provide a detailed design sketch for a new `pipetask` interface that attempts to address these problems, centered around a ``git``-like \"campaign directory\" concept that will be used to save state between different ``pipetask`` invocations."
+
+# Abstract, if available
+# abstract: >
+#           Write your paragraph
+#           here with multiple lines.
+#
+#           You can have multiple paragraphs too.
+
+# URL where this document is published by Read the Docs. e.g. http://sqr-001.lsst.codes
+url: "https://dmtn-175.lsst.io"
+
+# LSST Docushare URL, if authoritative versions of this are are stored there.
+# Leave as an empty string or comment out this key if there is no Docushare URL.
+docushare_url: ""
+
+# GitHub repo URL
+github_url: "https://github.com/lsst-dm/dmtn-175"
