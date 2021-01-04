@@ -1,0 +1,17 @@
+digraph flow {
+    node [shape=box];
+    pipeline [label="define pipeline\n(inc. configuration)"]
+    collections [label="set input collections"]
+    build_quantum_graph [label="build QuantumGraph"]
+    pipeline -> build_quantum_graph
+    collections -> build_quantum_graph
+    prep [label="create output collection,\nwrite/check provenance"]
+    register [label="register dataset types"]
+    execute [label="execute quanta"]
+    build_quantum_graph -> execute
+    pipeline -> prep
+    collections -> prep
+    register -> prep [style="dashed"]
+    prep -> execute
+    pipeline -> register
+}
