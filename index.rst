@@ -19,18 +19,37 @@ Preliminaries
 
 The reader is assumed to be familiar with the Gen3 butler's main organizational concepts (dimensions, data IDs, datasets, dataset types, and collections), the types of collections, and the basic functionality of the current ``pipetask`` tool.
 
+The "campaign" terminology used here is very much open to discussion; it's entirely possible that the concept it describes here does not match the unit of processing that "campaign" evokes for those who have used that term in the past.
+
+On a similar note, while I have not proposed a different name for the ``pipetask`` tool itself, this is a good time to consider whether we want one; I certainly think the best way to implement something like the design described here would be to do it alongside the current ``pipetask`` and deprecate that only when the new one is relatively complete.
+
+This document will probably be hard to understand in a single-pass read-through, though I can make some recommendations:
+
+- The next section, :ref:`sec-concepts`, should definitely be read first.
+
+- :ref:`sec-campaign-state` should be read next, though this contains a few forward-references for details (which should mostly be ignored on first read).
+  Expect to go back to this section frequently when reading later sections.
+
+- :ref:`sec-class-and-subcommands` contains numerous references to :ref:`sec-opts` that are often necessary to really understand what a method can and cannot do; readers should probably skim both of these sections before trying to understand either of them in detail.
+  When reading them in detail, it will probably be helpful to have views of both :ref:`sec-opts` and :ref:`sec-class-and-subcommands` open at the same time.
+
+.. _sec-concepts:
 
 Conceptual Overview
 ===================
 
+Campaigns
+---------
+
 A "campaign" is a directory with (at least) a ``.campaign.json`` file that tracks the what *will be* run, and how.
 As processing proceeds, this will also be the (default) directory where pipeline definitions, `QuantumGraphs<lsst.pipe.base.QuantumGraph>`, and logs are written.
-The same campaign is generally used for multiple "runs", each of which *usually* corresponds to a single output RUN-type collection.
+The same campaign is generally used for multiple "runs", each of which *usually* corresponds to its own output RUN-type collection.
 An important aspect of this design is that the ``.campaign.json`` information does not attempt to track what *has been* run; it may frequently do so incidentally, because our best guess at what to run next is often what we just ran, but actual provenance will always be stored in the data repository and managed by butler.
 
-A campaign directory may be in a non-POSIX location (reads and writes will use ``ButlerURI``), and ideally we would make it possible (but not necessary) for this to be the same as the directory that maps to the common prefix of the ``RUN`` collections that hold butler-managed output datasets, even though many of the files we'll write to it (certainly ``.campaign.json`` and logs) are not butler datasets.
+A campaign directory may be in a non-POSIX location (reads and writes will use ``ButlerURI``), and ideally we would make it possible (but not necessary) for this to be the same as the directory that maps to the common prefix of the `~lsst.daf.butler.CollectionType.RUN` collections that hold butler-managed output datasets, even though many of the files we'll write to it (certainly ``.campaign.json`` and logs) are not butler datasets.
 
-A campaign is often associated with a single CHAINED collection in a data repository that aggregates its inputs and outputs, but this is not required.
+The Python API will center around a `Campaign` class whose instances each represent a campaign directory.
+Campaign methods mostly correspond one-to-one with ``pipetask`` subcommands, and these are described together in :ref:`sec-class-and-subcommands`.
 
 ``pipetask`` interacts with a campaign in the same way that ``git`` interacts with a local repository: one special command, `Campaign.init`, is first invoked to set up the campaign, and all others are then invoked from within the campaign directory and then do not need to repeatedly provide the information stored within it by previous invocations.
 Unlike ``git``, however, commands other than `Campaign.init` can also be passed options that create or fundamentally modify a campaign on-the-fly, in order to allow simple processing to be performed with a single (albeit verbose) command.
@@ -38,8 +57,181 @@ The analogy also does not extend to the term "repository"; a ``git`` repository 
 
 The ``.campaign.json`` file is a hidden file (and JSON rather than YAML) to reflect the fact that it should be generally be manipulated by the ``pipetask`` tool, not humans running their favorite text editor.
 
-Interfaces
-==========
+Campaign Flow and Lifecycle
+---------------------------
+
+The big-picture steps involved in executing processing pipelines are shown in the figure below:
+
+.. figure:: /_static/flow.svg
+    :name: fig-flow
+
+The dependencies in this figure only show the simple case of running a pipeline once, however, and much of the complexity of the problem comes from the fact that users usually want to run the same pipeline (or many closely-related pipelines) many times, for different reasons:
+
+- to fix a problem, or just get something running at all for the first time;
+- to run the same pipeline on more data IDs;
+- to run additional tasks;
+- any combination of the above.\ [#comparing-campaigns]_
+
+There are no general rules about what happens when the user revisits one of the previous steps after performing a later one; each case is different and needs to be thought through carefully.
+In some cases, we may need to rely on the user for extra information: for example, if the user changes a configuration option after generating the `~lsst.pipe.base.QuantumGraph`, do we need to regenerate it?
+Or can we just re-run the existing graph?
+At present, there's no way for the software to tell whether a configuration (or software change, for that matter) would affect the graph; we *must* rely on the user.
+
+There is also at least one case where user have good reasons to prefer a different ordering of operations, even if starting from the beginning:
+
+- Users who just want to get something working will generally want to build a `~lsst.pipe.base.QuantumGraph` before creating an output collection and writing/checking provenance, to fail as early as possible (and avoiding writing anything to the repo whenever possible).
+
+- Users who expect to run multiple `QuantumGraphs<lsst.pipe.base.QuantumGraph>` in a campaign while writing results to the same output collection (especially in batch contexts) will often whan want to create that collection up front.
+
+Finally, users in at least some contexts have a strong expectation that they will be able to perform *all* of these steps (or, rather, arbitrary subsets!) with a single command-line invocation.
+This design mostly attempts to meet that expection, by mapping steps primarily to keyword arguments/comamnd-line options *as well as* methods/subcommands.
+For example, one can use `Campaign.edit` to set the input collections (`collections.inputs`) without updating anything downstream, but also use the same :option:`--input` option in `Campaign.run` to change them at that stage (or set them for the first time if starting from scratch).
+
+It's worth questioning whether the right design decision is to instead [try to] push back on that single-invocation expectation in the name of simplicity; that's just not something I've done here.
+
+.. [#comparing-campaigns]  The use case of running similar-but-not-identical pipelines on the same data IDs in order to compare their outputs is intentionally *not* included here, because that isn't something that should be done within one campaign; this is a use case best handled by using a different campaign for each pipeline (and possibly `importing<Campaign.import_quantum_graph` a `~lsst.pipe.base.QuantumGraph`).
+
+
+The Collection Stack
+--------------------
+
+The collections associated with a campaign are organized largely as a stack - in the first-in, first-out data structure sense.
+This idea is already lurking behind in the current ``pipetask``, but one of the goals in this redesign proposal is to make it more explicit in both the terminology (e.g. :option:`--push` and `Campaign.pop`) and the documentation as a way to give users a better mental model of what is going on.\ [#stack-awareness]_
+
+The top of the collection stack is what's searched first for input datasets, and it starts with the current output `~lsst.daf.butler.CollectionType.RUN`-type collection, if there is one (see `collections.current_run`, below).
+It proceeds to past `~lsst.daf.butler.CollectionType.RUN`-type collections produced as part of the same campaign (`collections.past_runs`), and ends with the pure-input collections (`collections.inputs`).
+When the campaign is configured to create a `~lsst.daf.butler.CollectionType.CHAINED`-type collection, the definition of the collection is exactly that sequence.
+
+When we do processing as part of a campaign, we'll often *push* a new `~lsst.daf.butler.CollectionType.RUN`-type collection to the top of the stack (I imagine this being the most common operation when extending the pipeline to new `PipelineTasks<lsst.pipe.base.PipelineTask>` as well).
+We can instead add more datasets to the collection that is already at the top of the stack (this is more common when adding new data IDs only).
+And finally we can *pop* the top collection and push a new one (:option:`--replace`) or even , which is the mode I expect developers to use when first getting something working or debugging problems.
+
+.. [#stack-awareness] I'm not actually sure that most Science Pipelines developers or external science users are super familiar with stacks in the data structure sense, because many of us have only informal programming backgrounds, but it's a sufficiently ubiquitous and simple concept that I still think it's worth asking people to learn about it in order to understand ``pipetask`` in detail.
+
+Future Extensions
+-----------------
+
+This proposal does not include any kind of BPS integration, just because it's a big proposal already.
+I do still hope that we can integrate the BPS command-line interface with this one, e.g. via some kind of subcommand-extension system that would add batch-submission subcommands for different batch systems, with *roughly* the same prerequisites and options as the `Campaign.run` method/subcommand described later.
+In Python, I am vaguely imagining an ABC for per-campaign, per-batch-system state, and that a `Campaign` object would have a container of concrete instances of these.
+
+It is also possible that adding quantum-level provenance to processing will have a bigger impact on this design than I am anticipating.
+That would allow us to write per-quantum configuration or even software versions, rather than per-`~lsst.daf.butler.CollectionType.RUN`.
+I suspect we will want to at least write per-`~lsst.daf.butler.CollectionType.RUN` provenance datasets *as well*, and I think that means the impact will be small.
+
+.. _sec-campaign-state:
+
+Campaign State
+==============
+
+The schema for the ``.campaign.json`` file is presented as a flat list below; ``.``-separated names indicate hierarchies in the actual JSON form.
+Options are ``str`` unless marked as some other type.
+
+It is expected that the `Campaign` class will have nearly identical state, but the detailed form it will take (``dict``?  nested ``dataclasses``?) is unspecified.
+
+`Campaign` class
+
+..
+   We [ab]use the py:data directive to make a definition list we can link to easily from elsewhere in the document.
+
+.. py:data:: version
+
+   version triplet for the campaign format.
+   Always present.
+   Cannot be changed after the campaign is created.
+
+.. py:data:: name
+
+   Name of the campaign.
+   Always present; defaulted if necessary.
+   Cannot be changed after the campaign is created.
+
+.. py:data:: doc
+
+   Documentation for the campaign.
+   Always present; defaults to ``""``.
+
+.. py:data:: repo
+
+   URI to the data repository.
+   Always present, no default, never ``null``.
+   Cannot be changed after the campaign is created.
+
+.. py:data:: collections.inputs
+
+   :type: ``list[str]``
+
+   List of input collections.
+   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
+
+.. py:data:: collections.chain
+
+   Name of the `~lsst.daf.butler.CollectionType.CHAINED` input/output collection.
+
+   Always present; defaulted to `name` if not provided when campaign is created.
+   May be set to ``null``, but does not default to ``null``.
+   Setting it to ``null`` does not automatically delete the collection if it has already been created, but `Campaign.clean` will delete it.
+
+   The child collections are set to the sequence ``(current_run, *past_runs, *inputs)`` whenever `~collections.current_run` is updated.
+
+.. py:data:: collections.current_run
+
+   Name for a current `~lsst.daf.butler.CollectionType.RUN`-type output collection that already exists and should generally be used by the next step that writes datasets.
+   This entry is often absent or ``null`` (these are equivalent), to indicate that steps that write datasets should create a new `~lsst.daf.butler.CollectionType.RUN`-type collection instead.
+
+.. py:data:: collections.next_run
+
+   Name or name pattern used to set `collections.current_run` when needed.
+   May contain placeholders, including ``%t`` to insert a timestamp, ``%n`` to insert a per-campaign counter value, and ``%c`` to insert the campaign name.
+   Always present; defaults to ``%c/%t``.
+
+.. py:data:: collections.past_runs
+
+   :type: ``list[str]``
+
+   Previous RUN-type collections created as part of this campaign, ordered from the most recent to the oldest.
+   Always present; defaults to an empty list.
+
+.. py:data:: collections.counter
+
+   :type: ``int``
+
+   Integer counter to insert into output run names with the ``%n`` placeholder.
+   Always present; defaults to ``0``.
+
+.. py:data:: collections.created
+
+   All collections created by this campaign.
+   This includes `~lsst.daf.butler.CollectionType.CHAINED` collections.
+
+.. py:data:: pipeline
+
+   URI to a pipeline YAML definition.
+   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
+
+.. py:data:: quantum_graph.uri
+
+   URI to a saved `~lsst.pipe.base.QuantumGraph` object.
+   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
+
+.. py:data:: quantum_graph.collections
+
+   :type: ``list[str]``
+
+   Snapshot of the input collections (both `collections.past_runs` and `collections.inputs`, concatenated) used to build or refresh the `~lsst.pipe.base.QuantumGraph`.
+
+   This is ``null`` if the graph was imported instead of built, and is used to test whether the graph needs to be refreshed or rebuilt prior to execution.
+
+.. py:data:: quantum_graph.pipeline_fingerprint
+
+   Hash or checksum of the pipeline (including software versions and configuration) used to build or refresh the graph.
+
+   This is ``null`` if the graph was imported instead of built, and is used to test whether the graph needs to be refreshed or rebuilt prior to execution.
+
+.. _sec-class-and-subcommands:
+
+The Campaign Class and Subcommands
+==================================
 
 The `Campaign` class is used to represent a campaign directory; instances can be contructed from an existing campaign directory and written out to create or modify a campaign directory.
 
@@ -50,7 +242,8 @@ Most subcommands are expected to be implemented in 2-3 lines, aside from the tra
 - a call to the method that corresponds directly to the subcommand;
 - a call to `Campaign.save` to write the updated campaign to disk.
 
-Because most parameters are common to multiple methods/subcommands, these are described in detail later in :ref:`opts`, using command-line option syntax instead of method parameter syntax to flesh out the command-line interface further.
+Because most parameters are common to multiple methods/subcommands, these are described in detail later in :ref:`sec-opts`, using command-line option syntax instead of method parameter syntax to flesh out the command-line interface further.
+Keyword argument names are just the long option names with ``-`` replaced by ``_``.
 
 .. py:class:: Campaign
 
@@ -71,7 +264,7 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
       (with ``**kwargs`` generated from command-line options).
 
-      Option groups:
+      **Option groups:**
 
       - :ref:`opts-campaign`:  The :option:`--repo` and :option:`--campaign-dir` options are replaced by the ``REPO`` and ``URI`` positional arguments for this subcommand (only), but the others are still valid here as-is.
         The ``URI`` argument is not relevant for the Python method call, because the campaign is not actually written until `save` is called.
@@ -79,6 +272,10 @@ Because most parameters are common to multiple methods/subcommands, these are de
       - :ref:`opts-pipeline`: Optional; if not provided, no pipeline information will be present in the campaign (yet).
 
       - :ref:`opts-collections`: Optional; if not provided, no input collections will be present in the campaign (yet) and output collection names will be set to their default values.
+
+      **Sequencing:**
+
+      This operation can only be run when the campaign does not yet exist, and hence before all other operations.
 
    .. py:staticmethod:: load(uri: ButlerURI) -> Campaign
 
@@ -103,14 +300,16 @@ Because most parameters are common to multiple methods/subcommands, these are de
          pipetask edit <OPTIONS>
 
       This method can be used to set all campaign information that can be specified in `init`, but it can be used on existing campaigns.
-      When used to modify input collections after a `~lsst.pipe.base.QuantumGraph` has already been built, `refresh_quantum_graph` should almost always been run afterwards.
-      When used to modify the pipeline after a `~lsst.pipe.base.QuantumGraph` has already been built, `build_quantum_graph` must be run for the changes to have any effect.
 
-      Option groups:
+      **Option groups:**
 
       - :ref:`opts-campaign`
       - :ref:`opts-pipeline`
       - :ref:`opts-collections`
+
+      **Sequencing:**
+
+      Can be run at any time, and can create a new campaign if one does not exist.
 
    .. py:method:: status(**kwargs)
 
@@ -129,25 +328,6 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
       Other Options: **TODO**
 
-   .. py:method:: register_dataset_types(**kwargs)
-
-      Register all intermediate and output dataset types that would be written by a pipeline, and check that all input dataset types are consistent with the definitions in the pipeline.
-
-      This method corresponds directly to the ``register-dataset-types`` subcommand:
-
-      .. code-block:: sh
-
-         pipetask register-dataset-types <OPTIONS>
-
-      The action of this method intentionally cannot be performed by providing options to any other method; registering dataset types is something that should be done only rarely, when they are first defined, and attempting to register them with every `pipetask` (as is all too easy to do now) is an antipattern that can lead to incorrectly-defined or typo'd dataset types that are hard to clean up.
-
-      This command does not require the campaign to already have a `~lsst.pipe.base.QuantumGraph`, and does not create one.
-      However, if a `~lsst.pipe.base.QuantumGraph` does exist, it is used instead of the pipeline to determine the tasks whose configurations should be saved, allowing campaigns to use imported `QuantumGraphs<lsst.pipe.base.QuantumGraph>` with no pipeline information at all.
-
-      Option groups:
-
-      - :ref:`opts-campaign`: :option:`campaign-dir` only, and only to find an existing campaign.
-
    .. py:method:: build_quantum_graph(**kwargs)
 
       Build a `~lsst.pipe.base.QuantumGraph` for the campaign.
@@ -158,7 +338,7 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
          pipetask qg build <OPTIONS>
 
-      Option groups:
+      **Option groups:**
 
       - :ref:`opts-campaign`
       - :ref:`opts-pipeline`
@@ -167,6 +347,16 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
          - :option:`--allow-pruning` (pruning is a fundamental part of building a graph and cannot be disabled)
          - :option:`--refresh` (a graph is implicitly refreshed when it is built, so other options normally enabled by :option:`--refresh` are allowed).
+
+      **Sequencing:**
+
+      Can be run at any time, can create a new campaign if one does not exist, and can edit the campaign's collections and/or pipeline.
+
+      A pipeline and input collections must be provided here or already present in the campaign.
+
+      If `collections.current_run` is set, it is ignored; only `collections.past_runs` and `collections.inputs` are used as inputs to `lsst.pipe.base.QuantumGraph` generation.
+
+      Downstream operations can be passed :option:`--rebuild` to perform this operation on-the-fly.
 
    .. py:method:: import_quantum_graph(uri: ButlerURI, **kwargs)
 
@@ -178,12 +368,19 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
          pipetask qg import <URI> <OPTIONS>
 
-      Option groups:
+      **Option groups:**
 
       - :ref:`opts-campaign`
       - :ref:`opts-qg`, except :option:`--data-query`
 
-      Passing :option:`--refresh` to this method/subcommand performs the refresh after the import, not before.
+         - Passing :option:`--refresh` to this method/subcommand performs the refresh after the import, not before.
+
+      **Sequencing:**
+
+      Can be run at any time, and can create a new campaign if one does not exist.
+      Cannot be used to modify the campaign's pipeline or input collections (because an imported graph essentially supersedes both of these).
+
+      This operation sets `quantum_graph.collections` and `quantum_graph.pipeline_fingerprint` to ``null``, which means that later steps will require a :ref:`resolution option<opts-discrepancies>` if `collections.inputs` or `pipeline` are also set.
 
    .. py:method:: refresh_quantum_graph(**kwargs)
 
@@ -197,23 +394,57 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
       Refreshing a `~lsst.pipe.base.QuantumGraph` ensures that any embedded `~lsst.daf.butler.DatasetRef` objects are resolved if and only if they can be found in the `collections.inputs`, `collections.past_runs`, and `collections.current_run` collections.
 
-      A campaign's `~lsst.pipe.base.QuantumGraph` should always be refreshed whenever the collections used to build it are changed.
+      A campaign's `~lsst.pipe.base.QuantumGraph` should always be (at least) refreshed whenever the collections used to build it are changed.
+      Refreshing the graph can never add new quanta, however; that requires a full rebuild.
 
       When an overall-input (i.e. non-intermediate) dataset cannot be resolved (by definition, these datasets must have been resolved when the `~lsst.pipe.base.QuantumGraph` was originally built) some aspects of the graph generation logic must be re-run, which can result in some quanta being dropped.
-      The :option:`--drop-existing-in` option can also be used to drop quanta whose outputs already exist.
+      The :option:`--trim-existing-in` option can also be used to drop quanta whose outputs already exist.
 
-      Option groups:
+      **Option groups:**
 
-      - :ref:`opts-campaign`: :option:`campaign-dir` only, and only to find an existing campaign.
+      - :ref:`opts-campaign`: :option:`--campaign-dir` only, and only to find an existing campaign.
       - :ref:`opts-qg`, except:
 
          - :option:`--data-query`
          - :option:`--extend-qg`
          - :option:`--refresh` (implied, so all options normally enabled by :option:`--refresh` are allowed).
 
+      **Sequencing:**
+
+      Can only be run on an existing campaign that already has a pipeline or a `~lsst.pipe.base.QuantumGraph`.
+
+      Cannot be used to perform any other operations.
+
+      Downstream operations can be passed :option:`--rebuild` to perform this operation on-the-fly.
+
+   .. py:method:: register_dataset_types(**kwargs)
+
+      Register all intermediate and output dataset types that would be written by a pipeline, and check that all input dataset types are consistent with the definitions in the pipeline.
+
+      This method corresponds directly to the ``register-dataset-types`` subcommand:
+
+      .. code-block:: sh
+
+         pipetask register-dataset-types <OPTIONS>
+
+      The action of this method intentionally cannot be performed by providing options to any other method; registering dataset types is something that should be done only rarely, when they are first defined, and attempting to register them with every ``pipetask`` invocation (as is all too easy to do now) is an antipattern that can lead to incorrectly-defined or typo'd dataset types that are hard to clean up.
+
+      **Option groups:**
+
+      - :ref:`opts-campaign`: :option:`--campaign-dir` only, and only to find an existing campaign.
+      - :ref:`opts-discrepancies`
+
+      **Sequencing:**
+
+      Can only be run on an existing campaign that already has a pipeline or a `~lsst.pipe.base.QuantumGraph`.
+
+      If both of these are present and are potentially discrepant, a :ref:`discrepancy resolution option<opts-discrepancies>` must be provided or another method must be called first to resolve the discrepancy.
+
+      Cannot be used to perform any other operations.
+
    .. py:method:: prep(**kwargs)
 
-      Register a new output ``RUN`` collection, write all "init output" datasets to it, including software versions and configuration for all tasks.
+      Register a new output `~lsst.daf.butler.CollectionType.RUN` collection, write all "init output" datasets to it, including software versions and configuration for all tasks.
 
       This method corresponds directly to the ``prep`` subcommand:
 
@@ -225,24 +456,30 @@ Because most parameters are common to multiple methods/subcommands, these are de
       If `collections.current_run` does already exist, it writes init output datasets if they do not exist and checks them for consistency if they do.
       If `collections.chain` is not ``null``, it also [re]registers and [re]defines that collection.
 
-      This command does not require the campaign to already have a `~lsst.pipe.base.QuantumGraph`, and does not create one.
-      However, if a `~lsst.pipe.base.QuantumGraph` does exist, it is used instead of the pipeline to determine the tasks whose configurations should be saved, allowing campaigns to use imported `QuantumGraphs<lsst.pipe.base.QuantumGraph>` with no pipeline information at all.
-
-      Option groups:
+      **Option groups:**
 
       - :ref:`opts-campaign`
       - :ref:`opts-pipeline`
       - :ref:`opts-collections`
+      - :ref:`opts-discrepancies`
       - :ref:`opts-execution`, except:
 
          - :option:`-j`, :option:`--processes`: irrelevant, because no quanta are executed.
          - :option:`--finish`, :option:`--no-finish`: :option:`--no-finish` is implied.
 
-   .. py::method:: run(**kwargs)
+      **Sequencing:**
+
+      Can be run at any time, can create a new campaign if one does not exist, and can edit the campaign's collections and/or pipeline.
+
+      Either a pipeline and input collections *or* a `~lsst.pipe.base.QuantumGraph` must be provided here or already present in the campaign, but a `~lsst.pipe.base.QuantumGraph` is never built by this operation.
+
+      If both of these are present and are potentially discrepant, a :ref:`discrepancy resolution option<opts-discrepancies>` must be provided or another method must be called first to resolve the discrepancy.
+
+   .. py:method:: run(**kwargs)
 
       Run the campaign's `~lsst.pipe.base.QuantumGraph`, creating it if needed.
 
-      This method corresponds directly to the ``run`` subcommand:
+      This method corresponds directly to the `~lsst.daf.butler.CollectionType.RUN` subcommand:
 
       .. code-block:: sh
 
@@ -251,19 +488,30 @@ Because most parameters are common to multiple methods/subcommands, these are de
       This operation will create a `~lsst.pipe.base.QuantumGraph` if one does not exist, but does not require the campaign to have a pipeline if it has a `~lsst.pipe.base.QuantumGraph` (which thus must have been imported).
 
       High-level interfaces like this method and subcommand should always invoke `prep` before actually running any quanta (but after creating the `~lsst.pipe.base.QuantumGraph`, if one does not exist).
-      This ensures that the output ``RUN``-type collection exists and that any provenance datasets it holds are consistent with the current configuration and environment.
+      This ensures that the output `~lsst.daf.butler.CollectionType.RUN`-type collection exists and that any provenance datasets it holds are consistent with the current configuration and environment.
       We also need a lower-level interface (at least in Python; *maybe* on the command-line, too, perhaps as a completely different executable) that instead *assumes* that `collections.current_run` exists and holds the right provenance datasets, for use by e.g. batch jobs that just want to run some already-exising quanta, but it's important that those interfaces are only called by higher-level code that itself ensures that `prep` is called appropriately.
 
-      Option groups:
+      Running a pipeline does *not* re-resolve any resolved overall-input `DatasetRefs<lsst.daf.butler.DatasetRef>` embedded in the `~lsst.pipe.base.QuantumGraph`, and hence it ignores `collections.inputs` entirely unless the graph is being [re]built or explicitly refreshed.
+      Embedded inputs `DatasetRefs<lsst.daf.butler.DatasetRef>` that correspond to intermediates that are being regenerated (i.e. their quanta are not being skipped) *are* re-resolved before that quantum is executed, in order to pick up datasets produced since execution began.
+
+      **Option groups:**
 
       - :ref:`opts-campaign`
       - :ref:`opts-pipeline`
       - :ref:`opts-collections`
       - :ref:`opts-execution`
+      - :ref:`opts-discrepancies`
 
-   .. py::method:: pop(n: int = 0, **kwargs)
+      **Sequencing:**
 
-      Drop existing ``RUN``-type collections from the campaign and redefine its ``CHAINED`` collection (if one exists) accordingly.
+      Can be run at any time, can create a new campaign if one does not exist, and can edit the campaign's collections and/or pipeline.
+      Will create a `~lsst.pipe.base.QuantumGraph` if one does not exist.
+
+      If both of these are present and are potentially discrepant, :option:`--refresh`, :option:`--rebuild`, or a :ref:`discrepancy resolution option<opts-discrepancies>` must be provided.
+
+   .. py:method:: pop(n: int = 0, **kwargs)
+
+      Drop existing `~lsst.daf.butler.CollectionType.RUN`-type collections from the campaign and redefine its `~lsst.daf.butler.CollectionType.CHAINED` collection (if one exists) accordingly.
 
       This method corresponds directly to the ``pop`` subcommand:
 
@@ -274,14 +522,18 @@ Because most parameters are common to multiple methods/subcommands, these are de
       If ``n == 0`` (default), `collections.current_run` is cleared if it is set.
       If ``n > 0``, the first ``n`` collections in ``collections.past_runs`` are also removed.
 
-      If `collections.chain` is not ``null``, the ``CHAINED``-type collection for this campaign is updated.
+      If `collections.chain` is not ``null``, the `~lsst.daf.butler.CollectionType.CHAINED`-type collection for this campaign is updated.
 
-      Option groups:
+      **Option groups:**
 
-      - :ref:`opts-campaign`: :option:`campaign-dir` only, and only to find an existing campaign.
+      - :ref:`opts-campaign`: :option:`--campaign-dir` only, and only to find an existing campaign.
       - : ref:opts-collections`:,: :option:`--unstore` and :option:`--purge` only.
 
-   .. py::method:: clean(purge: bool = False)
+      **Sequencing:**
+
+      Can only be run on an existing campaign that already has `collections.current_run` and/or `collections.past_runs` set (any collection that would be dropped by this operation must exist; anything else is an error that does not affect the repo at all).
+
+   .. py:method:: clean(purge: bool = False)
 
       Remove datasets and possibly collections were created by this campaign but have since been dropped.
 
@@ -293,23 +545,29 @@ Because most parameters are common to multiple methods/subcommands, these are de
 
       This operation computes the "dropped" collections as those that are in `collections.created` but not (currently) in any of `collections.chain`, `collections.past_runs`, `collections.inputs`, or `collections.current_run`.
 
-      If possible, we should make this remove directories that correspond to unstored ``RUN``-type collections, especially if those are in the campaign directory themselves.
+      If possible, we should make this remove directories that correspond to unstored `~lsst.daf.butler.CollectionType.RUN`-type collections, especially if those are in the campaign directory themselves.
 
-      Option groups:
+      **Option groups:**
 
-      - :ref:`opts-campaign`, :option:`campaign-dir` only, and only to find an existing campaign.
+      - :ref:`opts-campaign`, :option:`--campaign-dir` only, and only to find an existing campaign.
       - : ref:opts-collections`, :option:`--purge` only (:option:`--unstore` is the implied default behavior).
 
+      **Sequencing:**
 
-.. _opts:
+      Can only be run on an existing campaign.
+
+      It is not an error to run this when it would do nothing.
+
+
+.. _sec-opts:
 
 Common Option Groups
---------------------
+====================
 
 .. _opts-campaign:
 
 Campaign Definition
-^^^^^^^^^^^^^^^^^^^
+-------------------
 
 These options are used to provide the core campaign definition information.
 
@@ -339,7 +597,7 @@ These options are used to provide the core campaign definition information.
 .. _opts-pipeline:
 
 Pipeline Definition
-^^^^^^^^^^^^^^^^^^^
+-------------------
 
 These options are used to define, modify, or inspect the pipeline.
 
@@ -386,7 +644,7 @@ The behavior of options that modify the pipeline is specified such that repeated
 .. _opts-collections:
 
 Collections
-^^^^^^^^^^^
+-----------
 
 These options control the input and output collections.
 
@@ -403,15 +661,15 @@ These options control the input and output collections.
 
 .. option:: --chain <NAME>
 
-   Name of the ``CHAINED`` collection that combines input collections and all output collections; sets `collections.chain` in ``.campaign.json``.
+   Name of the `~lsst.daf.butler.CollectionType.CHAINED` collection that combines input collections and all output collections; sets `collections.chain` in ``.campaign.json``.
 
 .. option:: --no-chain
 
-   Disable creation of the ``CHAINED`` collection by setting `collections.chain` to ``null`` in ``.campaign.json``.
+   Disable creation of the `~lsst.daf.butler.CollectionType.CHAINED` collection by setting `collections.chain` to ``null`` in ``.campaign.json``.
 
 .. option:: --next-run <NAME>
 
-   Name for the RUN collection that will directly hold the outputs of the next ``RUN``-type collection created.
+   Name for the RUN collection that will directly hold the outputs of the next `~lsst.daf.butler.CollectionType.RUN`-type collection created.
    Sets `collections.next_run` in ``.campaign.json``; see that for documentation on placeholders and defaults.
 
 .. option:: --set-counter <INT>
@@ -421,7 +679,7 @@ These options control the input and output collections.
 .. _opts-qg:
 
 QuantumGraphs
-^^^^^^^^^^^^^
+-------------
 
 .. option:: --qg-dot <URI>
 
@@ -429,7 +687,7 @@ QuantumGraphs
 
 .. option:: --write-qg [<URI>]
 
-   Write the `~lsst.pipe.base.QuantumGraph` file to the given URI, and update the `quantum_graph` entry in ``.campaign.json`` to point to it.
+   Write the `~lsst.pipe.base.QuantumGraph` file to the given URI, and update the `quantum_graph.uri` entry in ``.campaign.json`` to point to it.
    If invoked with no argument, or if not provided but other options require a local `~lsst.pipe.base.QuantumGraph` to be created, a default filename (using the campaign name) within the campaign directory is used.
 
 .. option:: -d <QUERY>, --data-query <QUERY>
@@ -442,16 +700,18 @@ QuantumGraphs
 
 .. option:: --refresh
 
-   Equivalent to running `refresh_quantum_graph` immediately before (usually) or after (where noted) some other method.
+   Equivalent to running `Campaign.refresh_quantum_graph` immediately before (usually) or after (where noted) some other method.
+
+   This can be used to address errors that would otherwise occur because the pipeline (including code edits to local setups) or input collections have changed since the `~lsst.pipe.base.QuantumGraph` was built, essentially asserting that these changes can trim quanta and change `~lsst.daf.butler.DatasetRef` resolutions, but would not otherwise modify the graph.
 
 .. option:: --trim-existing-in [INPUTS|CAMPAIGN|RUN]
 
    Remove quanta from the `~lsst.pipe.base.QuantumGraph` when all of their outputs already exist in the given collection category:
 
-   ``RUN``
+   `~lsst.daf.butler.CollectionType.RUN`
       Trim a quantum if all of its outputs exist in `collections.current_run`; do nothing if `collections.current_run` is not set.
    ``CAMPAIGN``
-      Trim a quantum if all of its outputs exist in either `collections.current_run` or `collections.past_runs`, i.e. any ``RUN``-type collection produced by this campaign that has not been discarded from it;
+      Trim a quantum if all of its outputs exist in either `collections.current_run` or `collections.past_runs`, i.e. any `~lsst.daf.butler.CollectionType.RUN`-type collection produced by this campaign that has not been discarded from it;
    ``INPUTS``
       Trim a quantum if all of its outputs exist in any of `collections.current_run`, `collections.past_runs`, or `collections.inputs`.
 
@@ -459,7 +719,7 @@ QuantumGraphs
 
 .. option:: --allow-pruning
 
-   When refreshing a `~lsst.pipe.base.QuantumGraph`, allow a quantum to be removed if one or more of its input datasets cannot be resolved and the `~lsst.pipe.base.PipelineTask` indicates that the quantum is not viable without them.
+   When refreshing a `~lsst.pipe.base.QuantumGraph`, allow a quan`camptum to be removed if one or more of its input datasets cannot be resolved and the `~lsst.pipe.base.PipelineTask` indicates that the quantum is not viable without them.
 
    When this option is not given and an nonviable quantum is found, the refresh operation fails but the campaign and its `~lsst.pipe.base.QuantumGraph` are not modified.
 
@@ -467,7 +727,7 @@ QuantumGraphs
 
 .. option:: --allow-empty
 
-   When building a `~lsst.pipe.base.QuantumGraph` or refreshing one with :option:`--allow-pruning` or `--drop-existing-in`, allow the graph to end up with no quanta.
+   When building a `~lsst.pipe.base.QuantumGraph` or refreshing one with :option:`--allow-pruning` or :option:`--trim-existing-in`, allow the graph to end up with no quanta.
    When this option is not given, an empty graph is treated as an error condition, and the campaign and its `~lsst.pipe.base.QuantumGraph` are not modified.
 
    Except where otherwise noted, :option:`--refresh` must also be passed for this option to be valid.
@@ -477,7 +737,7 @@ QuantumGraphs
 Execution
 ---------
 
-These options control how quanta are executed and how ``RUN``-type collections are created and manipulated.
+These options control how quanta are executed and how `~lsst.daf.butler.CollectionType.RUN`-type collections are created and manipulated.
 
 .. option:: -j <INT>, --processes <INT>
 
@@ -486,22 +746,22 @@ These options control how quanta are executed and how ``RUN``-type collections a
 
 .. option:: --finish, --no-finish
 
-   Controls whether or not to clear `collections.current_run` after all requested quanta are executed successfully, and hence whether the *next* invocation ``pipetask`` that writes to a ``RUN``-type collection will use the same one.
+   Controls whether or not to clear `collections.current_run` after all requested quanta are executed successfully, and hence whether the *next* invocation ``pipetask`` that writes to a `~lsst.daf.butler.CollectionType.RUN`-type collection will use the same one.
    The default behavior depends on other options and the previous state of `collections.current_run`:
 
    - If `collections.current_run` was previously set and is being used (e.g. :option:`--push` was not passed), or if the full `~lsst.pipe.base.QuantumGraph` was not run, the default is to leave `collections.current_run` in place for the next invocation.
 
-   - If `collections.current_run` was not previously set, or if other options (e.g. :option:`--push`) were used to create a new ``RUN``-type collection anyway, the default is to clear `collections.current_run` so the next invocation will create a new ``RUN``-type collection as well.
+   - If `collections.current_run` was not previously set, or if other options (e.g. :option:`--push`) were used to create a new `~lsst.daf.butler.CollectionType.RUN`-type collection anyway, the default is to clear `collections.current_run` so the next invocation will create a new `~lsst.daf.butler.CollectionType.RUN`-type collection as well.
 
 .. option:: --push
 
-   Create a new ``RUN``-type collection for output datasets created by this method/subcommand.
+   Create a new `~lsst.daf.butler.CollectionType.RUN`-type collection for output datasets created by this method/subcommand.
    If `collections.current_run` is not set, this is the default behavior.
    If it is set, the value of `collections.current_run` is inserted at the front of `collections.past_runs`.
 
 .. option:: --replace
 
-   Create a new ``RUN``-type collection for output datasets created by this method/subcommand., dropping `collections.current_run`.
+   Create a new `~lsst.daf.butler.CollectionType.RUN`-type collection for output datasets created by this method/subcommand., dropping `collections.current_run`.
    It is an error to pass this option if `collections.current_run` is not set.
 
 .. option:: --continue
@@ -530,97 +790,34 @@ These options control how quanta are executed and how ``RUN``-type collections a
 
    Unlike :option:`--trim-existing-in`, this does not modify the `~lsst.pipe.base.QuantumGraph`, but the argument choices have the same definition.
 
-Campaign Metadata Schema
-========================
+.. option:: --rebuild
 
-The schema for the ``.campaign.json`` file is presented as a flat list below; ``.``-separated names indicate hierarchies in the actual JSON form.
-Options are ``str`` unless marked as some other type.
+   Rebuild the `~lsst.pipe.base.QuantumGraph` before running.
 
-..
-   We [ab]use the py:data directive to make a definition list we can link to easily from elsewhere in the document.
+.. _opts-discrepancies:
 
-.. py:data:: version
+Discrepancy Resolution Options
+------------------------------
 
-   version triplet for the campaign format.
-   Always present.
+Some options are used to resolve potential discrepancies between the `~lsst.pipe.base.QuantumGraph` and the pipeline and input collections from which it is typically built, when these are set out-of-order or the graph is imported.
+These include:
 
-.. py:data:: name
+.. option:: --use-task-configs
 
-   Name of the campaign.
-   Always present; defaulted if necessary.
+   Do not rebuild or refresh the `~lsst.pipe.base.QuantumGraph` before running, but use the pipeline's tasks and configuration instead of those in the `~lsst.pipe.base.QuantumGraph`, matching them by label.
 
-.. py:data:: doc
+   Note that changes `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
 
-   Documentation for the campaign.
-   Always present; defaults to ``""``.
+.. option:: --use-qg-configs
 
-.. py:data:: repo
+   Do not rebuild or refresh the `~lsst.pipe.base.QuantumGraph` before running, but use as-is, ignoring the tasks in the pipeline completely.
 
-   URI to the data repository.
-   Always present, no default, never ``null``.
+   Note that changes `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
 
-.. py:data:: collections.inputs
+Two previously-mentioned options can also be used in some contexts to resolve these discrepancies on-the-fly:
 
-   :type: ``list[str]``
-
-   List of input collections.
-   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
-
-.. py:data:: collections.chain
-
-   Name of the ``CHAINED`` input/output collection.
-
-   Always present; defaulted to `name` if not provided when campaign is created.
-   May be set to ``null``, but does not default to ``null``.
-   Setting it to ``null`` does not automatically delete the collection if it has already been created, but `Campaign.clean` will delete it.
-
-   The child collections are set to the sequence ``(current_run, *past_runs, *inputs)`` whenever `~collections.current_run` is updated.
-
-.. py:data:: collections.current_run
-
-   Name for a current ``RUN``-type output collection that already exists and should generally be used by the next step that writes datasets.
-   This entry is often absent or ``null`` (these are equivalent), to indicate that steps that write datasets should create a new ``RUN``-type collection instead.
-
-.. py:data:: collections.next_run
-
-   Name or name pattern used to set `collections.current_run` when needed.
-   May contain placeholders, including ``%t`` to insert a timestamp, ``%n`` to insert a per-campaign counter value, and ``%c`` to insert the campaign name.
-   Always present; defaults to ``%c/%t``.
-
-.. py:data:: collections.past_runs
-
-   :type: ``list[str]``
-
-   Previous RUN-type collections created as part of this campaign, ordered from the most recent to the oldest.
-   Always present; defaults to an empty list.
-
-.. py:data:: collections.counter
-
-   :type: ``int``
-
-   Integer counter to insert into output run names with the ``%n`` placeholder.
-   Always present; defaults to ``0``.
-
-.. py:data:: collections.created
-
-   All collections created by this campaign.
-   This includes ``CHAINED`` collections.
-
-.. py:data:: pipeline
-
-   URI to a pipeline YAML definition.
-   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
-
-.. py:data:: quantum_graph.uri
-
-   URI to a saved `~lsst.pipe.base.QuantumGraph` object.
-   May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
-
-.. py:data:: quantum_graph.dirty
-
-   :type: ``bool``
-
-   Status flag set if the input collections or pipeline definition have changed since the `~lsst.pipe.base.QuantumGraph` was built.
+ - :option:`--refresh`: refresh the graph by querying for its datasets again (and possibly removing quanta accordingly), but assert no other modifications are possible.
+ - :option:`--rebuild`: rebuild the graph entirely.  This is always the safest option, but will often be unnecessary.
 
 .. .. rubric:: References
 
