@@ -739,6 +739,8 @@ Execution
 
 These options control how quanta are executed and how `~lsst.daf.butler.CollectionType.RUN`-type collections are created and manipulated.
 
+Note that many existing ``pipetask`` options that are primarily about running individual quanta as part of a larger batch job are not present here; I'm currently thinking that we should really have a separate lower-level command-line tool (and associated Python class) for that simpler user case.
+
 .. option:: -j <INT>, --processes <INT>
 
    Number of processes used for local (single-node) execution.
