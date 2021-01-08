@@ -33,6 +33,32 @@ This document will probably be hard to understand in a single-pass read-through,
 - :ref:`sec-class-and-subcommands` contains numerous references to :ref:`sec-opts` that are often necessary to really understand what a method can and cannot do; readers should probably skim both of these sections before trying to understand either of them in detail.
   When reading them in detail, it will probably be helpful to have views of both :ref:`sec-opts` and :ref:`sec-class-and-subcommands` open at the same time.
 
+Unfinished Business
+-------------------
+
+While this document represents a fairly complete snapshot of my thinking at one point, some discussions since the last substantive changes have raised some possibilities I'd want to explore further before considering even myself happy with this proposal.
+But it's also past time for me to get this out for review to others, especially considering that there may be other new big ideas out there that should be considered before making any major changes here.
+So I'll just leave most of the content as-is, and list here the big ideas I'd want to explore further:
+
+- Creating a SQLite staging registry (even for local execution), by transferring input datasets needed from an "upstream" shared registry after `~lsst.pipe.base.QuantumGraph` generation.
+  Datasets would only be pushed back to the upstream repo if explicitly requested.
+  This could be a one-step way to provide a lot more insulation between users, and hence make the shared repo access model easier to implement (maybe the only non-admin write operations we need to support are ingest and import?) while also giving users more power to play in their own sandboxes.
+  It also opens up a lot of intriguing possibilities for campaign features (more on that in later bullets).
+  I think the big complications this raises are about how to handle multiple transfers from upstream (if needed), when the staging repo doesn't start out empty and there's potential for conflicts, especially when `~lsst.pipe.base.QuantumGraph` generation is run multiple times over the life of the campaign.
+
+- I don't think I've tried quite hard enough to remove functionality here that isn't obviously needed in the name of simplification.
+  One concrete example is that I don't think anyone really needs to be able to change the input collections after a campaign is created, though it's also impossible to rigorously guard against the possibility that input collection *content* may have changed (unless we only care about changes to a local staging repo!), so that may not be as much of a simplification as I hope.
+
+- We could at least sometimes initialize a git repository in the campaign directory and commit every time we run ``pipetask``.
+  That would provide a really nice history-tracking and rollback feature almost for free, though it's not quite as useful if we don't also go in the direction of having a local SQLite registry that we could also git-control, and it doesn't seem like something that's viable for large campaigns (unless we can define a sound subset of the campaign content that's still worth putting in git).
+
+- Michelle Gower brought up the possibility of putting the campaign metadata into the registry database, as that's desirable for long-term control and management of that at least in the BPS context.
+  I'm a bit wary of expanding ``butler``/``pipetask`` to centrally control even more things (developer campaigns may be quite different from production campaigns in that respect - sandboxes vs. data releases).
+  But combined with a local SQLite repo, so the metadata for sandbox campaigns doesn't get pushed upstrea until/unless a run is pushed back, it's very intriguing.
+
+- The possibility of putting log files in the Registry as well was also raised by Michelle.
+  I think we'd all agree that relating logs to their processing runs in the registry database makes sense, but I think it's also pretty clear that `~lsst.daf.butler.Butler.get` and `~lsst.daf.butler.Butler.put` are not ideal interfaces for them (we could work with them, I imagine, but it seems like forcing/encouraging log access through those is a negative-value proposition).
+
 .. _sec-concepts:
 
 Conceptual Overview
@@ -43,13 +69,13 @@ Campaigns
 
 A "campaign" is a directory with (at least) a ``.campaign.json`` file that tracks the what *will be* run, and how.
 As processing proceeds, this will also be the (default) directory where pipeline definitions, `QuantumGraphs<lsst.pipe.base.QuantumGraph>`, and logs are written.
-The same campaign is generally used for multiple "runs", each of which *usually* corresponds to its own output RUN-type collection.
+The same campaign is generally used for multiple "runs", each of which *usually* corresponds to its own output `~lsst.daf.butler.CollectionType.RUN`-type collection.
 An important aspect of this design is that the ``.campaign.json`` information does not attempt to track what *has been* run; it may frequently do so incidentally, because our best guess at what to run next is often what we just ran, but actual provenance will always be stored in the data repository and managed by butler.
 
-A campaign directory may be in a non-POSIX location (reads and writes will use ``ButlerURI``), and ideally we would make it possible (but not necessary) for this to be the same as the directory that maps to the common prefix of the `~lsst.daf.butler.CollectionType.RUN` collections that hold butler-managed output datasets, even though many of the files we'll write to it (certainly ``.campaign.json`` and logs) are not butler datasets.
+A campaign directory may be in a non-POSIX location (reads and writes will use `lsst.daf.butler.ButlerURI`), and ideally we would make it possible (but not necessary) for this to be the same as the directory that maps to the common prefix of the `~lsst.daf.butler.CollectionType.RUN` collections that hold butler-managed output datasets, even though many of the files we'll write to it (certainly ``.campaign.json`` and logs) are not butler datasets.
 
 The Python API will center around a `Campaign` class whose instances each represent a campaign directory.
-Campaign methods mostly correspond one-to-one with ``pipetask`` subcommands, and these are described together in :ref:`sec-class-and-subcommands`.
+`Campaign` methods mostly correspond one-to-one with ``pipetask`` subcommands, and these are described together in :ref:`sec-class-and-subcommands`.
 
 ``pipetask`` interacts with a campaign in the same way that ``git`` interacts with a local repository: one special command, `Campaign.init`, is first invoked to set up the campaign, and all others are then invoked from within the campaign directory and then do not need to repeatedly provide the information stored within it by previous invocations.
 Unlike ``git``, however, commands other than `Campaign.init` can also be passed options that create or fundamentally modify a campaign on-the-fly, in order to allow simple processing to be performed with a single (albeit verbose) command.
@@ -65,46 +91,46 @@ The big-picture steps involved in executing processing pipelines are shown in th
 .. figure:: /_static/flow.svg
     :name: fig-flow
 
-The dependencies in this figure only show the simple case of running a pipeline once, however, and much of the complexity of the problem comes from the fact that users usually want to run the same pipeline (or many closely-related pipelines) many times, for different reasons:
+The dependencies in this figure only show the simple case of running a pipeline once, however, and much of the complexity of the problem comes from the fact that users usually want to run the same pipeline (or many closely-related pipelines) many times, for different reasons:\ [#comparing-campaigns]_
 
 - to fix a problem, or just get something running at all for the first time;
 - to run the same pipeline on more data IDs;
 - to run additional tasks;
-- any combination of the above.\ [#comparing-campaigns]_
+- any combination of the above.
 
 There are no general rules about what happens when the user revisits one of the previous steps after performing a later one; each case is different and needs to be thought through carefully.
 In some cases, we may need to rely on the user for extra information: for example, if the user changes a configuration option after generating the `~lsst.pipe.base.QuantumGraph`, do we need to regenerate it?
 Or can we just re-run the existing graph?
 At present, there's no way for the software to tell whether a configuration (or software change, for that matter) would affect the graph; we *must* rely on the user.
 
-There is also at least one case where user have good reasons to prefer a different ordering of operations, even if starting from the beginning:
+There is also at least one case where users have good reasons to prefer different orders of operations, even if starting from the beginning:
 
-- Users who just want to get something working will generally want to build a `~lsst.pipe.base.QuantumGraph` before creating an output collection and writing/checking provenance, to fail as early as possible (and avoiding writing anything to the repo whenever possible).
+- Users who just want to get something working will generally want to build a `~lsst.pipe.base.QuantumGraph` before creating an output collection and writing/checking provenance, to fail as early as possible (and avoiding writing anything to the repo).
 
-- Users who expect to run multiple `QuantumGraphs<lsst.pipe.base.QuantumGraph>` in a campaign while writing results to the same output collection (especially in batch contexts) will often whan want to create that collection up front.
+- Users who expect to run multiple `QuantumGraphs<lsst.pipe.base.QuantumGraph>` in a campaign while writing results to the same output collection (especially in batch contexts) will often want to create that collection up front to avoid race condition.
 
 Finally, users in at least some contexts have a strong expectation that they will be able to perform *all* of these steps (or, rather, arbitrary subsets!) with a single command-line invocation.
-This design mostly attempts to meet that expection, by mapping steps primarily to keyword arguments/comamnd-line options *as well as* methods/subcommands.
+This design mostly attempts to meet that expection, by mapping steps to keyword arguments/command-line options *as well as* methods/subcommands.
 For example, one can use `Campaign.edit` to set the input collections (`collections.inputs`) without updating anything downstream, but also use the same :option:`--input` option in `Campaign.run` to change them at that stage (or set them for the first time if starting from scratch).
 
-It's worth questioning whether the right design decision is to instead [try to] push back on that single-invocation expectation in the name of simplicity; that's just not something I've done here.
+It's worth questioning whether the right design decision is to instead [try to] push back on that single-invocation expectation in the name of simplicity; that's just not something I've done here (and I suspect at least a couple of single-invocation use cases are really quite well-motivated).
 
-.. [#comparing-campaigns]  The use case of running similar-but-not-identical pipelines on the same data IDs in order to compare their outputs is intentionally *not* included here, because that isn't something that should be done within one campaign; this is a use case best handled by using a different campaign for each pipeline (and possibly `importing<Campaign.import_quantum_graph` a `~lsst.pipe.base.QuantumGraph`).
+.. [#comparing-campaigns]  The use case of running similar-but-not-identical pipelines on the same data IDs in order to compare their outputs is intentionally *not* included here, because that isn't something that should be done within one campaign; this is a use case best handled by using a different campaign for each pipeline (and possibly `importing<Campaign.import_quantum_graph>` a `~lsst.pipe.base.QuantumGraph`).
 
 
 The Collection Stack
 --------------------
 
 The collections associated with a campaign are organized largely as a stack - in the first-in, first-out data structure sense.
-This idea is already lurking behind in the current ``pipetask``, but one of the goals in this redesign proposal is to make it more explicit in both the terminology (e.g. :option:`--push` and `Campaign.pop`) and the documentation as a way to give users a better mental model of what is going on.\ [#stack-awareness]_
+This idea is already lurking behind the current ``pipetask``, but one of the goals in this redesign proposal is to make it more explicit in both the terminology (e.g. :option:`--push` and `Campaign.pop`) and the documentation as a way to give users a better mental model of what is going on.\ [#stack-awareness]_
 
 The top of the collection stack is what's searched first for input datasets, and it starts with the current output `~lsst.daf.butler.CollectionType.RUN`-type collection, if there is one (see `collections.current_run`, below).
 It proceeds to past `~lsst.daf.butler.CollectionType.RUN`-type collections produced as part of the same campaign (`collections.past_runs`), and ends with the pure-input collections (`collections.inputs`).
 When the campaign is configured to create a `~lsst.daf.butler.CollectionType.CHAINED`-type collection, the definition of the collection is exactly that sequence.
 
-When we do processing as part of a campaign, we'll often *push* a new `~lsst.daf.butler.CollectionType.RUN`-type collection to the top of the stack (I imagine this being the most common operation when extending the pipeline to new `PipelineTasks<lsst.pipe.base.PipelineTask>` as well).
+When we do processing as part of a campaign, we'll often *push* a new `~lsst.daf.butler.CollectionType.RUN`-type collection to the top of the stack (I imagine this being the most common operation when extending the pipeline to new `PipelineTasks<lsst.pipe.base.PipelineTask>`).
 We can instead add more datasets to the collection that is already at the top of the stack (this is more common when adding new data IDs only).
-And finally we can *pop* the top collection and push a new one (:option:`--replace`) or even , which is the mode I expect developers to use when first getting something working or debugging problems.
+And, finally, we can *pop* the top collection and push a new one (:option:`--replace`) or even pop all of them (:option:`--restart`), which is the mode I expect developers to use when first getting something working or debugging problems.
 
 .. [#stack-awareness] I'm not actually sure that most Science Pipelines developers or external science users are super familiar with stacks in the data structure sense, because many of us have only informal programming backgrounds, but it's a sufficiently ubiquitous and simple concept that I still think it's worth asking people to learn about it in order to understand ``pipetask`` in detail.
 
@@ -125,11 +151,9 @@ Campaign State
 ==============
 
 The schema for the ``.campaign.json`` file is presented as a flat list below; ``.``-separated names indicate hierarchies in the actual JSON form.
-Options are ``str`` unless marked as some other type.
+Options are `str` unless marked as some other type.
 
 It is expected that the `Campaign` class will have nearly identical state, but the detailed form it will take (``dict``?  nested ``dataclasses``?) is unspecified.
-
-`Campaign` class
 
 ..
    We [ab]use the py:data directive to make a definition list we can link to easily from elsewhere in the document.
@@ -143,7 +167,7 @@ It is expected that the `Campaign` class will have nearly identical state, but t
 .. py:data:: name
 
    Name of the campaign.
-   Always present; defaulted if necessary.
+   Always present; defaults to the directory name if that is a valid name (.g. not ``.``).
    Cannot be changed after the campaign is created.
 
 .. py:data:: doc
@@ -159,7 +183,7 @@ It is expected that the `Campaign` class will have nearly identical state, but t
 
 .. py:data:: collections.inputs
 
-   :type: ``list[str]``
+   :type: `list` [`str`]
 
    List of input collections.
    May be absent, but is required to be present (or populated on-the-fly) by some subcommands.
@@ -187,14 +211,14 @@ It is expected that the `Campaign` class will have nearly identical state, but t
 
 .. py:data:: collections.past_runs
 
-   :type: ``list[str]``
+   :type: `list` [`str`]
 
    Previous RUN-type collections created as part of this campaign, ordered from the most recent to the oldest.
    Always present; defaults to an empty list.
 
 .. py:data:: collections.counter
 
-   :type: ``int``
+   :type: `int`
 
    Integer counter to insert into output run names with the ``%n`` placeholder.
    Always present; defaults to ``0``.
@@ -216,7 +240,7 @@ It is expected that the `Campaign` class will have nearly identical state, but t
 
 .. py:data:: quantum_graph.collections
 
-   :type: ``list[str]``
+   :type: `list` [`str`]
 
    Snapshot of the input collections (both `collections.past_runs` and `collections.inputs`, concatenated) used to build or refresh the `~lsst.pipe.base.QuantumGraph`.
 
@@ -719,7 +743,7 @@ QuantumGraphs
 
 .. option:: --allow-pruning
 
-   When refreshing a `~lsst.pipe.base.QuantumGraph`, allow a quan`camptum to be removed if one or more of its input datasets cannot be resolved and the `~lsst.pipe.base.PipelineTask` indicates that the quantum is not viable without them.
+   When refreshing a `~lsst.pipe.base.QuantumGraph`, allow a quantum to be removed if one or more of its input datasets cannot be resolved and the `~lsst.pipe.base.PipelineTask` indicates that the quantum is not viable without them.
 
    When this option is not given and an nonviable quantum is found, the refresh operation fails but the campaign and its `~lsst.pipe.base.QuantumGraph` are not modified.
 
@@ -795,6 +819,7 @@ Note that many existing ``pipetask`` options that are primarily about running in
 .. option:: --rebuild
 
    Rebuild the `~lsst.pipe.base.QuantumGraph` before running.
+   This option may be passed even when there is no graph (it is ignored).
 
 .. _opts-discrepancies:
 
