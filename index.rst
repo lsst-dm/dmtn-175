@@ -54,7 +54,7 @@ So I'll just leave most of the content as-is, and list here the big ideas I'd wa
 
 - Michelle Gower brought up the possibility of putting the campaign metadata into the registry database, as that's desirable for long-term control and management of that at least in the BPS context.
   I'm a bit wary of expanding ``butler``/``pipetask`` to centrally control even more things (developer campaigns may be quite different from production campaigns in that respect - sandboxes vs. data releases).
-  But combined with a local SQLite repo, so the metadata for sandbox campaigns doesn't get pushed upstrea until/unless a run is pushed back, it's very intriguing.
+  But combined with a local SQLite repo, so the metadata for sandbox campaigns doesn't get pushed upstream until/unless a run is pushed back, it's very intriguing.
 
 - The possibility of putting log files in the Registry as well was also raised by Michelle.
   I think we'd all agree that relating logs to their processing runs in the registry database makes sense, but I think it's also pretty clear that `~lsst.daf.butler.Butler.get` and `~lsst.daf.butler.Butler.put` are not ideal interfaces for them (we could work with them, I imagine, but it seems like forcing/encouraging log access through those is a negative-value proposition).
@@ -121,7 +121,7 @@ It's worth questioning whether the right design decision is to instead [try to] 
 The Collection Stack
 --------------------
 
-The collections associated with a campaign are organized largely as a stack - in the first-in, first-out data structure sense.
+The collections associated with a campaign are organized largely as a stack - in the first-in, last-out data structure sense.
 This idea is already lurking behind the current ``pipetask``, but one of the goals in this redesign proposal is to make it more explicit in both the terminology (e.g. :option:`--push` and `Campaign.pop`) and the documentation as a way to give users a better mental model of what is going on.\ [#stack-awareness]_
 
 The top of the collection stack is what's searched first for input datasets, and it starts with the current output `~lsst.daf.butler.CollectionType.RUN`-type collection, if there is one (see `collections.current_run`, below).
@@ -167,7 +167,7 @@ It is expected that the `Campaign` class will have nearly identical state, but t
 .. py:data:: name
 
    Name of the campaign.
-   Always present; defaults to the directory name if that is a valid name (.g. not ``.``).
+   Always present; defaults to the directory name if that is a valid name (e.g. not ``.``).
    Cannot be changed after the campaign is created.
 
 .. py:data:: doc
@@ -551,7 +551,7 @@ Keyword argument names are just the long option names with ``-`` replaced by ``_
       **Option groups:**
 
       - :ref:`opts-campaign`: :option:`--campaign-dir` only, and only to find an existing campaign.
-      - : ref:opts-collections`:,: :option:`--unstore` and :option:`--purge` only.
+      - :ref:`opts-collections`:,: :option:`--unstore` and :option:`--purge` only.
 
       **Sequencing:**
 
@@ -574,7 +574,7 @@ Keyword argument names are just the long option names with ``-`` replaced by ``_
       **Option groups:**
 
       - :ref:`opts-campaign`, :option:`--campaign-dir` only, and only to find an existing campaign.
-      - : ref:opts-collections`, :option:`--purge` only (:option:`--unstore` is the implied default behavior).
+      - :ref:`opts-collections`, :option:`--purge` only (:option:`--unstore` is the implied default behavior).
 
       **Sequencing:**
 
@@ -644,7 +644,7 @@ The behavior of options that modify the pipeline is specified such that repeated
    Override a ``pex_config`` parameter value.
    This creates a local pipeline if one does not exist.
    If a URI to an external pipeline exists, it will be imported in the new local pipeline.
-   If a local pipeline does exist, this is added as a (YAML) config override to it, replacing an existing override for the same option if it exists and creating a section for the label of necessary.
+   If a local pipeline does exist, this is added as a (YAML) config override to it, replacing an existing override for the same option if it exists and creating a section for the label if necessary.
 
 .. option:: -C <LABEL>:<URI>, --config-file <LABEL>:<URI>
 
@@ -833,13 +833,13 @@ These include:
 
    Do not rebuild or refresh the `~lsst.pipe.base.QuantumGraph` before running, but use the pipeline's tasks and configuration instead of those in the `~lsst.pipe.base.QuantumGraph`, matching them by label.
 
-   Note that changes `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
+   Note that changes to `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
 
 .. option:: --use-qg-configs
 
    Do not rebuild or refresh the `~lsst.pipe.base.QuantumGraph` before running, but use as-is, ignoring the tasks in the pipeline completely.
 
-   Note that changes `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
+   Note that changes to `collections.inputs` since the graph was generated are also ignored when this option is used; those cannot be used unless the graph is at least refreshed.
 
 Two previously-mentioned options can also be used in some contexts to resolve these discrepancies on-the-fly:
 
