@@ -59,6 +59,13 @@ So I'll just leave most of the content as-is, and list here the big ideas I'd wa
 - The possibility of putting log files in the Registry as well was also raised by Michelle.
   I think we'd all agree that relating logs to their processing runs in the registry database makes sense, but I think it's also pretty clear that `~lsst.daf.butler.Butler.get` and `~lsst.daf.butler.Butler.put` are not ideal interfaces for them (we could work with them, I imagine, but it seems like forcing/encouraging log access through those is a negative-value proposition).
 
+- K-T suggested looking at third-party tooling for `more general data science workflows`_ for ideas, such as `MLFlow`_.
+  I didn't have a chance to get to this before we decided to accelerate getting the document out for review.
+
+.. _more general data science workflows: https://neptune.ai/blog/the-best-mlflow-alternatives
+
+.. _MLFlow: https://mlflow.org/
+
 .. _sec-concepts:
 
 Conceptual Overview
