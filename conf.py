@@ -15,8 +15,12 @@ with open(metadata_path, 'r') as f:
 g = globals()
 g.update(confs)
 
+# This technote is essentially doc-driven design of Python code, so set the
+# role so we can just use `thing` to create refs to Python things.
+default_role = "py:obj"
+
 # Add intersphinx inventories as needed
 # http://www.sphinx-doc.org/en/stable/ext/intersphinx.html
-# Example:
-#
-#     intersphinx_mapping['python'] = ('https://docs.python.org/3', None)
+
+intersphinx_mapping['python'] = ('https://docs.python.org/3', None)
+intersphinx_mapping['pipelines'] = ('https://pipelines.lsst.io/v/weekly/', None)

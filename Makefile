@@ -12,6 +12,12 @@ ifeq ($(shell which $(SPHINXBUILD) >/dev/null 2>&1; echo $$?), 1)
 $(error The '$(SPHINXBUILD)' command was not found. Try 'running pip install -r requirements.txt' to get the necessary Python dependencies.)
 endif
 
+# Figures built by graphviz.
+_static/%.svg : %.dot
+	dot -Tsvg $< -o $@
+
+FIGURES = _static/flow.svg
+
 # Internal variables.
 PAPEROPT_a4     = -D latex_paper_size=a4
 PAPEROPT_letter = -D latex_paper_size=letter
@@ -31,12 +37,12 @@ help:
 clean:
 	rm -rf $(BUILDDIR)/*
 
-html:
+html: $(FIGURES)
 	$(SPHINXBUILD) -b html $(ALLSPHINXOPTS) $(BUILDDIR)/html
 	@echo
 	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
 
-epub:
+epub: $(FIGURES)
 	$(SPHINXBUILD) -b epub $(ALLSPHINXOPTS) $(BUILDDIR)/epub
 	@echo
 	@echo "Build finished. The epub file is in $(BUILDDIR)/epub."

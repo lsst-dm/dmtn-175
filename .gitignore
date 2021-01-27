@@ -1,1 +1,3 @@
 _build/
+pyenv
+_static/*.svg
