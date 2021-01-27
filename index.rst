@@ -3,11 +3,9 @@
 
 .. Please do not modify tocdepth; will be fixed when a new Sphinx theme is shipped.
 
-.. TODO: Delete the note below before merging new content to the master branch.
-
 .. note::
 
-   **This technote is not yet published.**
+   **This technote is a historical artifact that does not represent an active proposal.  It was a useful thought experiment, and some of the ideas may be revived in the future, but overall we have decided to move in a very different direction for the use cases this design was intended to support.**
 
    The ``pipetask`` tool included in the Gen3 middleware for running `PipelineTasks<lsst.pipe.base.PipelineTask>` is often opaque and hard to use.  This is partly the result of history; the original interface was much more straightforward, but it assumed a very different collections model than what Butler has now, and the changes made to adapt it to the new collections system did not go deep enough.
    But it also suffers from the fact that many of its steps are "leaky"; information provided in one step (e.g. input collections used for `~lsst.pipe.base.QuantumGraph`) cannot be straightforwardly passed to later steps (e.g. execution of that `~lsst.pipe.base.QuantumGraph`), forcing it to rely on the user to provide consistent arguments and limiting the guarantees we can make about behavior in the presence of user error.
